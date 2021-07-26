@@ -1,0 +1,11 @@
+#compdef ssh-ctx
+#autoload
+
+local state
+
+_arguments \
+  '1: :->keys'
+
+case $state in
+  (keys) compadd $(NO_COLOR=1 ssh-ctx) ;;
+esac

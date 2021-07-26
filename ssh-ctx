@@ -1,0 +1,162 @@
+#!/bin/bash
+
+[[ -n $DEBUG ]] && set -x
+
+set -eou pipefail
+
+SSHCTX="${XDG_CACHE_HOME:-$HOME/.ssh}/sshctx"
+
+usage() {
+  local SELF
+  SELF="ssh-ctx"
+
+  cat <<EOF
+Ssh private keys are considered as contexts. Prefix you additional keys with 'id_rsa_' and place in '~/.ssh'. \
+Now you can switch ssh-agent (context) key with ${SELF}:
+
+USAGE:
+  $SELF                       : list the contexts
+  $SELF <NAME>                : switch to context <NAME>
+  $SELF -                     : switch to the previous context
+  $SELF -c, --current         : show the current context name
+  $SELF -u, --unset           : unset the current context
+
+  $SELF -h,--help             : show this message
+EOF
+}
+
+exit_err() {
+   echo >&2 "${1}"
+   exit 1
+}
+
+current_context() {
+  list_contexts "current_only"
+}
+
+list_contexts() {
+  local yellow darkbg normal asd
+  yellow=$(tput setaf 3 || true)
+  darkbg=$(tput setab 0 || true)
+  normal=$(tput sgr0 || true)
+
+  local cur_ctx_fg cur_ctx_bg
+  cur_ctx_fg=${KUBECTX_CURRENT_FGCOLOR:-$yellow}
+  cur_ctx_bg=${KUBECTX_CURRENT_BGCOLOR:-$darkbg}
+
+  loaded_keys=$(ssh-add -L || true)
+  find ~/.ssh -type f ! -name "*.*" -name "id_rsa*" | sort | while read priv_key_path; do
+    priv_key_name="${priv_key_path##*/}"
+
+    context_name="${priv_key_path##*_}"
+    if [ "$context_name" = "rsa" ]; then
+        context_name="_default"
+    fi
+
+    # get pub key contents
+    if [ -f "${priv_key_path}.pub" ]; then
+        pub_key_contents=$(<${priv_key_path}.pub)
+    else
+        pub_key_contents=$(ssh-keygen -y -f ${priv_key_path})
+    fi
+
+    # workaround keys with empty comment
+    pub_key_contents_array=( $pub_key_contents )
+    if [ "${#pub_key_contents_array[@]}" = "2" ]; then
+      pub_key_contents="$pub_key_contents ${priv_key_path}"
+    fi
+
+    # output
+    if echo $loaded_keys | grep -Fxq "$pub_key_contents" ; then
+      if [[ -z "${NO_COLOR:-}" && -z "${1:-}" ]]; then
+      # colored output mode
+        echo "${cur_ctx_bg}${cur_ctx_fg}${context_name}${normal}"
+      else
+        echo "${context_name}"
+      fi
+    elif [[ -z "${1:-}" ]]; then
+      echo "${context_name}"
+    fi
+  done
+}
+
+read_context() {
+  if [[ -f "${SSHCTX}" ]]; then
+    cat "${SSHCTX}"
+  fi
+}
+
+save_context() {
+  local saved
+  saved="$(read_context)"
+
+  if [[ "${saved}" != "${1}" ]]; then
+    printf %s "${1}" > "${SSHCTX}"
+  fi
+}
+
+switch_context() {
+  if [[ "${1}" != "_default" ]]; then
+    key_name="id_rsa_${1}"
+  else
+    key_name="id_rsa"
+  fi
+  ssh-add -D && ssh-add ~/.ssh/${key_name}
+}
+
+set_context() {
+  local prev
+  prev="$(current_context)" || exit_err "error getting current context"
+
+  switch_context "${1}"
+
+  if [[ "${prev}" != "${1}" ]]; then
+    save_context "${prev}"
+  fi
+}
+
+swap_context() {
+  local ctx
+  ctx="$(read_context)"
+  if [[ -z "${ctx}" ]]; then
+    echo "error: No previous context found." >&2
+    exit 1
+  fi
+  set_context "${ctx}"
+}
+
+unset_context() {
+  echo "Unsetting current context." >&2
+  ssh-add -D
+}
+
+main() {
+  if [[ "$#" -eq 0 ]]; then
+    list_contexts
+  elif [[ "$#" -gt 1 ]]; then
+    echo "error: too many arguments" >&2
+    usage
+    exit 1
+  elif [[ "$#" -eq 1 ]]; then
+    if [[ "${1}" == "-" ]]; then
+      swap_context
+    elif [[ "${1}" == '-c' || "${1}" == '--current' ]]; then
+      current_context
+    elif [[ "${1}" == '-u' || "${1}" == '--unset' ]]; then
+      unset_context
+    elif [[ "${1}" == '-h' || "${1}" == '--help' ]]; then
+      usage
+    elif [[ "${1}" =~ ^-(.*) ]]; then
+      echo "error: unrecognized flag \"${1}\"" >&2
+      usage
+      exit 1
+    else
+      set_context "${1}"
+    fi
+  else
+    usage
+    exit 1
+  fi
+}
+
+main "$@"
